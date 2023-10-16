@@ -159,7 +159,7 @@ class Trainer(object):
                 if self.current_step % self.save_checkpoint_steps == 0 and \
                         (not self.dist_train or (self.dist_train and global_rank == 0)):
                     save_model(model, self.output_model_path + "-" + str(self.current_step), args.use_lora)
-
+            
             self.current_step += 1
 
 
