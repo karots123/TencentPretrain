@@ -32,3 +32,30 @@ class Embedding(nn.Module):
             emb = self.layer_norm(emb)
         emb = self.dropout(emb)
         return emb
+
+class EmbeddingPipe(torch.nn.Module):
+    def __init__(self, args,model):
+        super(EmbeddingPipe, self).__init__()
+        self.word_embeddings = model.embedding
+        self.mask = args.mask
+        self.rotary_position_embedding=args.rotary_position_embedding
+        self.relative_position_embedding=args.relative_position_embedding
+        if self.relative_position_embedding:
+            from tencentpretrain.layers.relative_position_embedding import RelativePositionEmbedding
+            self.relative_pos_emb = RelativePositionEmbedding(bidirectional=True, heads_num=args.heads_num,
+                                                              num_buckets=args.relative_attention_buckets_num)
+        elif self.rotary_position_embedding:
+            from tencentpretrain.utils.rope import precompute_freqs_cis
+            self.freqs_cis = precompute_freqs_cis(args.hidden_size // args.heads_num, args.max_seq_length * 2)
+        self.has_residual_attention = args.has_residual_attention
+   
+    def forward(self, ipt):
+       
+        src, tgt, seg=ipt
+        self.devicde=src.device
+        
+        emb=self.word_embeddings(src, seg)
+       
+        hidden = emb
+
+        return hidden,tgt,seg

@@ -14,8 +14,20 @@ from tencentpretrain.utils.optimizers import *
 from tencentpretrain.utils import *
 from tencentpretrain.utils.seed import set_seed
 from tencentpretrain.initialize import *
+from tencentpretrain.embeddings.embedding import EmbeddingPipe
+from tencentpretrain.layers.transformer import ParallelTransformerLayerPipe
+from tencentpretrain.targets.target import PipeTarget
 
 
+
+def get_model(model,args):
+   
+    layers = [LayerSpec(EmbeddingPipe, args,model=model),
+              *[LayerSpec(ParallelTransformerLayerPipe, args,model=model, layer_idx=idx) for idx in
+                range(args.layers_num)],
+              LayerSpec(PipeTarget, args=args,model=model)
+             ]
+    return layers
 def init_model(args):
     if args.deepspeed:
         import deepspeed
@@ -676,7 +688,18 @@ def worker(local_rank, gpu_ranks, args):
 
     # Build model.
     model_for_training, model_for_dataloader = init_model(args)
+    if args.use_pipe:
+            from deepspeed.pipe import PipelineModule, TiedLayerSpec, LayerSpec
+            # run_test(args.local_rank)   
+            layers=get_model(model_for_training,args)
+            from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
+            topo = PipeModelDataParallelTopology(num_pp=mpu.get_pipeline_model_parallel_world_size(),
+                                             num_mp=mpu.get_tensor_model_parallel_world_size(),
+                                             num_dp=mpu.get_data_parallel_world_size())
 
+            model_for_training=PipelineModule(layers=layers, 
+                                              num_stages=args.pipeline_model_parallel_size,activation_checkpoint_interval=1,
+                                              checkpointable_layers=['ParallelTransformerLayerPipe'],topology=topo)
     # Build optimizer.
     custom_optimizer, custom_scheduler, optimizer_grouped_parameters = init_optimizer(args, model_for_training)
 
@@ -688,7 +711,7 @@ def worker(local_rank, gpu_ranks, args):
                                                     args=args,
                                                     optimizer=custom_optimizer,
                                                     lr_scheduler=custom_scheduler,
-                                                    mpu=mpu if args.use_mp else None,
+                                                    mpu=mpu if args.use_mp and not args.use_pipe else None,
                                                     dist_init_required=False)
         if args.resume_from_checkpoint is not None:
             load_path, _ = model_for_training.load_checkpoint(

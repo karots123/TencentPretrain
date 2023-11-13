@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch
 from tencentpretrain.layers.multi_headed_attn import MultiHeadedAttention, ParallelMultiHeadedAttention
 from tencentpretrain.layers import *
 
@@ -226,3 +227,98 @@ class TransformerDecoderLayer(nn.Module):
             mid_norm = self.layer_norm_3(mid)
             output = self.dropout_3(self.feed_forward(mid_norm)) + mid
         return output
+
+class ParallelTransformerLayerPipe(nn.Module):
+    def __init__(self, args,model,layer_idx):
+        self.layer_idx=layer_idx
+        super(ParallelTransformerLayerPipe, self).__init__()
+        self.layer_num=args.layers_num
+        self.layer = model.encoder.transformer[layer_idx]
+        self.layernorm_positioning = args.layernorm_positioning
+        if self.layernorm_positioning == "pre":
+           self.layer_norm=model.encoder.layer_norm 
+        from tencentpretrain.utils.rope import precompute_freqs_cis
+        self.freqs_cis = precompute_freqs_cis(args.hidden_size // args.heads_num, args.max_seq_length * 2)
+        self.mask = args.mask
+    def generate_mask(self,seg,seq_length,batch_size,device):
+        if self.mask == "fully_visible":
+            mask = (seg > 0). \
+                unsqueeze(1). \
+                repeat(1, seq_length, 1). \
+                unsqueeze(1)
+            mask = mask.float()
+            mask = (1.0 - mask) * -10000.0
+        elif self.mask == "causal":
+            mask = torch.ones(seq_length, seq_length, device=device)
+            mask = torch.tril(mask)
+            mask = (1.0 - mask) * -10000
+            mask = mask.repeat(batch_size, 1, 1, 1)
+        else:
+            mask_a = (seg == 1). \
+                unsqueeze(1). \
+                repeat(1, seq_length, 1). \
+                unsqueeze(1).float()
+
+            mask_b = (seg > 0). \
+                unsqueeze(1). \
+                repeat(1, seq_length, 1). \
+                unsqueeze(1).float()
+
+            mask_tril = torch.ones(seq_length, seq_length, device=device)
+            mask_tril = torch.tril(mask_tril)
+            mask_tril = mask_tril.repeat(batch_size, 1, 1, 1)
+
+            mask = (mask_a + mask_b + mask_tril >= 2).float()
+            mask = (1.0 - mask) * -10000.0
+        return mask
+    def tensor_args(self,position_bias, has_residual_attention, prev_attn, freqs_cis):
+        
+        if len(position_bias.size())==1:
+            if int(position_bias) ==0:
+                position_bias=None
+       
+        if int(has_residual_attention)==0:
+            has_residual_attention=False
+        else:
+            has_residual_attention=True
+        if len(prev_attn.size())==1:
+            if int(prev_attn)==0:
+                prev_attn=None
+
+        if len(freqs_cis.size())==1:
+            if int(freqs_cis)==0:
+                freqs_cis=None
+        else:
+            freqs_cis=torch.view_as_complex(freqs_cis)
+        return position_bias, has_residual_attention, prev_attn, freqs_cis
+    
+       
+    def forward(self,input):
+        
+       
+       
+        hidden,tgt,seg=input
+        prev_attn=None
+        
+        batch_size, seq_length, _ = hidden.size()
+        mask = self.generate_mask(seg,seq_length,batch_size,hidden.device)
+        
+        
+        freqs_cis = self.freqs_cis[:seq_length].to(hidden.device)
+        position_bias=False
+        has_residual_attention=False
+        
+        self.devicde=hidden.device
+        
+        if  self.layer_idx!=self.layer_num-1:
+             hidden,_=self.layer(hidden, mask, position_bias, has_residual_attention, prev_attn, freqs_cis)
+         
+             return  hidden,tgt,seg
+            
+             
+        else:
+             
+             hidden,_=self.layer(hidden, mask, position_bias, has_residual_attention, prev_attn, freqs_cis)
+             if self.layernorm_positioning == "pre":
+                hidden=self.layer_norm(hidden)
+             return hidden,tgt,seg
